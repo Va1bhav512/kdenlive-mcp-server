@@ -1,9 +1,16 @@
 [project]
 name = "kdenlive-mcp-server"
 version = "0.1.0"
-description = "Add your description here"
+description = "MCP server for Kdenlive video editing via cli-anything-kdenlive"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.28.0",
+    "cli-anything-kdenlive>=1.0.0",
 ]
+
+[project.scripts]
+kdenlive-mcp = "kdenlive_mcp_server.server:main"
+
+[tool.uv.sources]
+cli-anything-kdenlive = { git = "https://github.com/HKUDS/CLI-Anything.git", subdirectory = "kdenlive/agent-harness" }
