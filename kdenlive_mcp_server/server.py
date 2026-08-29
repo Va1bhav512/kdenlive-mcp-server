@@ -125,6 +125,22 @@ def _resolve_path(p: str) -> str:
     return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
 
 
+def _probe_duration(media_path: str) -> float | None:
+    """Try ffprobe to get duration in seconds; returns None if unavailable."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", media_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired, OSError):
+        pass
+    return None
+
+
 def _require_project() -> dict[str, Any] | None:
     if not _session.has_project():
         return _err("No project open. Call project_new or project_open first.")
@@ -337,7 +353,7 @@ def bin_import_clip(
     Args:
         clip_path: Path to the media file (video, audio, or image).
         name: Optional display name. Defaults to the filename.
-        duration: Optional duration override in seconds (useful for images).
+        duration: Optional duration override in seconds (useful for images). If None, auto-probed via ffprobe.
         clip_type: Media type hint: video, audio, image, color, title.
     """
     err = _require_project()
@@ -349,11 +365,24 @@ def bin_import_clip(
         return _err(f"Media file not found: {clip_path} (resolved: {resolved})")
 
     try:
+        # auto-probe duration if not provided
+        effective_duration = duration
+        if effective_duration is None:
+            effective_duration = _probe_duration(resolved)
+            # for images, default 5s if probe fails
+            if effective_duration is None:
+                effective_duration = 5.0 if clip_type in ("image", "color", "title") else 0.0
         _session.snapshot("Import clip")
         clip = bin_mod.import_clip(
             _session.get_project(), resolved,
-            name=name, duration=duration or 0.0, clip_type=clip_type,
+            name=name, duration=effective_duration or 0.0, clip_type=clip_type,
         )
+        # if duration was 0 (probe failed for video), try to patch with probed value after import
+        if clip.get("duration", 0.0) == 0.0 and clip_type == "video":
+            probed = _probe_duration(resolved)
+            if probed and probed > 0:
+                clip["duration"] = probed
+                _save()
         _save()
         return _ok(clip)
     except (ValueError, FileNotFoundError, RuntimeError, FileExistsError) as e:
@@ -473,16 +502,36 @@ def timeline_add_clip(
         clip_id: Bin clip identifier to place (from bin_list_clips).
         track: Target track number.
         position: Start time on the timeline in seconds.
-        in_point: Media in-point (crop start) in seconds.
-        out_point: Media out-point (crop end) in seconds. Defaults to full duration.
+        in_point: Media trim-in (where to start playback inside source) in seconds.
+        out_point: Media trim-out (where to end playback inside source) in seconds. Defaults to full bin duration. Use timeline_trim_clip to adjust after placement.
     """
     err = _require_project()
     if err:
         return err
     try:
+        proj = _session.get_project()
+        # auto-resolve missing out_point when bin duration is 0 (unprobed image/video)
+        if out_point is None:
+            bin_clip = next((c for c in proj.get("bin", []) if c["id"] == clip_id), None)
+            if bin_clip is not None:
+                dur = bin_clip.get("duration", 0.0)
+                if dur == 0.0:
+                    # try probe source file
+                    probed = _probe_duration(bin_clip.get("source", ""))
+                    if probed and probed > 0:
+                        bin_clip["duration"] = probed
+                        dur = probed
+                        _save()
+                if dur == 0.0:
+                    # still 0: guide user
+                    return _err(
+                        f"Bin clip {clip_id} has duration 0. Re-import with duration or provide out_point. "
+                        f"For images use duration=5. Got in_point={in_point}, bin duration {dur}"
+                    )
+                out_point = dur
         _session.snapshot("Add clip to track")
         entry = tl_mod.add_clip_to_track(
-            _session.get_project(), track, clip_id,
+            proj, track, clip_id,
             position=position, in_point=in_point, out_point=out_point,
         )
         _save()
@@ -525,13 +574,13 @@ def timeline_trim_clip(
     in_point: float | None = None,
     out_point: float | None = None,
 ) -> dict[str, Any]:
-    """Adjust the in/out crop handles of a timeline clip.
+    """Adjust the in/out trim handles of a timeline clip (not the crop filter).
 
     Args:
         track_id: Track containing the clip.
         clip_index: 0-based index of the clip within the track.
-        in_point: New in-point in seconds. None = leave unchanged.
-        out_point: New out-point in seconds. None = leave unchanged.
+        in_point: New trim-in in seconds. None = leave unchanged.
+        out_point: New trim-out in seconds. None = leave unchanged.
     """
     err = _require_project()
     if err:
@@ -930,7 +979,7 @@ def export_xml(output_path: str | None = None) -> dict[str, Any]:
     """Generate Kdenlive/MLT XML for the current project.
 
     Args:
-        output_path: Optional file path to write the XML to.
+        output_path: Optional file path to write the XML to (e.g. ~/Downloads/myproj.kdenlive). If None, no file is written and XML is returned in data.xml for you to copy.
     """
     err = _require_project()
     if err:
