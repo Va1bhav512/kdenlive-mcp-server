@@ -26,6 +26,88 @@ server = FastMCP("kdenlive-mcp-server")
 
 _session = Session()
 
+# ── global state for timeline navigation & render queue ───────────
+_render_queue: list[dict[str, Any]] = []
+_render_status: dict[str, Any] = {"running": False, "current": None, "completed": 0, "total": 0}
+
+
+# Extend filter registry with additional frei0r/effect filters
+_EXTRA_FILTERS: dict[str, dict[str, Any]] = {
+    "affine": {"mlt_service": "affine", "category": "transform", "params": {"x": {"type": "float", "default": 0}, "y": {"type": "float", "default": 0}, "scale_x": {"type": "float", "default": 1}, "scale_y": {"type": "float", "default": 1}, "angle": {"type": "float", "default": 0}}},
+    "luma_key": {"mlt_service": "luminance", "category": "keying", "params": {"threshold": {"type": "float", "default": 0.5}, "slope": {"type": "float", "default": 0.1}}},
+    "opacity": {"mlt_service": "frei0r.opacity", "category": "effect", "params": {"opacity": {"type": "float", "default": 1.0}}},
+    "frei0r.opacity": {"mlt_service": "frei0r.opacity", "category": "effect", "params": {"opacity": {"type": "float", "default": 1.0}}},
+    "frei0r.blur": {"mlt_service": "frei0r.blur", "category": "effect", "params": {"radius": {"type": "float", "default": 5.0}}},
+    "frei0r.sharpness": {"mlt_service": "frei0r.sharpness", "category": "effect", "params": {"amount": {"type": "float", "default": 0.5}}},
+    "frei0r.contrast": {"mlt_service": "frei0r.contrast0r", "category": "color", "params": {"contrast": {"type": "float", "default": 1.0}}},
+    "frei0r.brightness": {"mlt_service": "frei0r.brightness", "category": "color", "params": {"brightness": {"type": "float", "default": 0.0}}},
+    "frei0r.saturation": {"mlt_service": "frei0r.saturat0r", "category": "color", "params": {"saturation": {"type": "float", "default": 1.0}}},
+    "frei0r.hue": {"mlt_service": "frei0r.hueshift0r", "category": "color", "params": {"hue": {"type": "float", "default": 0.0}}},
+    "frei0r.gamma": {"mlt_service": "frei0r.gamma", "category": "color", "params": {"gamma": {"type": "float", "default": 1.0}}},
+    "frei0r.invert": {"mlt_service": "frei0r.invert0r", "category": "color", "params": {}},
+    "frei0r.mirror": {"mlt_service": "frei0r.mirror", "category": "effect", "params": {"mirror_x": {"type": "bool", "default": False}, "mirror_y": {"type": "bool", "default": False}}},
+    "frei0r.flip": {"mlt_service": "frei0r.flippo", "category": "effect", "params": {}},
+    "frei0r.sepia": {"mlt_service": "frei0r.sopsat", "category": "color", "params": {"amount": {"type": "float", "default": 0.5}}},
+    "frei0r.vignette": {"mlt_service": "frei0r.vignette", "category": "effect", "params": {"radius": {"type": "float", "default": 0.5}, "softness": {"type": "float", "default": 0.2}}},
+    "frei0r.glow": {"mlt_service": "frei0r.glow", "category": "effect", "params": {"blur": {"type": "float", "default": 5.0}}},
+    "frei0r.sobel": {"mlt_service": "frei0r.sobel", "category": "effect", "params": {}},
+    "frei0r.emboss": {"mlt_service": "frei0r.emboss", "category": "effect", "params": {"azimuth": {"type": "float", "default": 30}, "elevation": {"type": "float", "default": 30}}},
+    "frei0r.pixelize": {"mlt_service": "frei0r.pixeliz0r", "category": "effect", "params": {"blocksize": {"type": "int", "default": 8}}},
+    "frei0r.scanline": {"mlt_service": "frei0r.scanline0r", "category": "effect", "params": {"line_height": {"type": "int", "default": 2}}},
+    "frei0r.distort": {"mlt_service": "frei0r.dist0r", "category": "effect", "params": {"amount": {"type": "float", "default": 0.1}}},
+    "frei0r.nervous": {"mlt_service": "frei0r.nervous", "category": "effect", "params": {}},
+    "frei0r.cartoon": {"mlt_service": "frei0r.cartoon", "category": "effect", "params": {"threshold": {"type": "float", "default": 0.5}}},
+    "frei0r.bw0r": {"mlt_service": "frei0r.bw0r", "category": "color", "params": {}},
+    "frei0r.tint": {"mlt_service": "frei0r.tint0r", "category": "color", "params": {"color": {"type": "str", "default": "#ff0000"}}},
+    "frei0r.curves": {"mlt_service": "frei0r.curves", "category": "color", "params": {}},
+    "frei0r.equalizer": {"mlt_service": "frei0r.equaliz0r", "category": "color", "params": {}},
+    "frei0r.noise": {"mlt_service": "frei0r.noise", "category": "effect", "params": {"amount": {"type": "float", "default": 0.1}}},
+    "frei0r.lens_correction": {"mlt_service": "frei0r.lenscorrection", "category": "effect", "params": {"k1": {"type": "float", "default": 0}, "k2": {"type": "float", "default": 0}}},
+    "chroma_key_advanced": {"mlt_service": "frei0r.select0r", "category": "keying", "params": {"color": {"type": "str", "default": "#00ff00"}, "variance": {"type": "float", "default": 0.2}, "slope": {"type": "float", "default": 0.1}}},
+    "color_balance": {"mlt_service": "avfilter.colorbalance", "category": "color", "params": {"red": {"type": "float", "default": 0}, "green": {"type": "float", "default": 0}, "blue": {"type": "float", "default": 0}}},
+    "white_balance": {"mlt_service": "avfilter.colortemperature", "category": "color", "params": {"temperature": {"type": "float", "default": 6500}}},
+    "unsharp": {"mlt_service": "avfilter.unsharp", "category": "effect", "params": {"amount": {"type": "float", "default": 1.0}}},
+}
+for _k, _v in _EXTRA_FILTERS.items():
+    if _k not in filt_mod.FILTER_REGISTRY:
+        filt_mod.FILTER_REGISTRY[_k] = _v
+
+# patch validator to handle missing min/max and bool type
+_orig_validate = filt_mod._validate_filter_params
+
+def _tolerant_validate(filter_name: str, params: dict[str, Any]) -> dict[str, Any]:
+    spec = filt_mod.FILTER_REGISTRY[filter_name]
+    param_specs = spec["params"]
+    unknown = set(params.keys()) - set(param_specs.keys())
+    if unknown:
+        raise ValueError(f"Unknown parameters for '{filter_name}': {', '.join(unknown)}. Valid: {', '.join(param_specs.keys())}")
+    result: dict[str, Any] = {}
+    for pname, pspec in param_specs.items():
+        value = params.get(pname, pspec["default"])
+        ptype = pspec["type"]
+        if ptype == "float":
+            value = float(value)
+            if "min" in pspec and "max" in pspec:
+                if value < pspec["min"] or value > pspec["max"]:
+                    raise ValueError(f"Parameter '{pname}' value {value} out of range [{pspec['min']}, {pspec['max']}].")
+        elif ptype == "int":
+            value = int(value)
+            if "min" in pspec and "max" in pspec:
+                if value < pspec["min"] or value > pspec["max"]:
+                    raise ValueError(f"Parameter '{pname}' value {value} out of range [{pspec['min']}, {pspec['max']}].")
+        elif ptype == "bool":
+            # accept bool/int/str
+            if isinstance(value, str):
+                value = value.lower() in ("1", "true", "yes")
+            else:
+                value = bool(value)
+        elif ptype == "str":
+            value = str(value)
+        result[pname] = value
+    return result
+
+filt_mod._validate_filter_params = _tolerant_validate
+
 
 # ── helpers ──────────────────────────────────────────────────────
 
@@ -146,6 +228,75 @@ def project_get_info() -> dict[str, Any]:
 def project_list_profiles() -> dict[str, Any]:
     """Enumerate all available video output profiles (hd1080p30, 4k60, sd_pal, etc.)."""
     return _ok(proj_mod.list_profiles())
+
+
+@server.tool()
+def project_get_profile() -> dict[str, Any]:
+    """Get the current project's video profile (resolution, FPS, aspect ratio)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        profile = proj.get("profile", {})
+        return _ok(profile)
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def project_set_profile(
+    profile: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    fps_num: int | None = None,
+    fps_den: int | None = None,
+    progressive: bool | None = None,
+    dar_num: int | None = None,
+    dar_den: int | None = None,
+) -> dict[str, Any]:
+    """Set or update the project's video profile.
+
+    Args:
+        profile: Preset profile name (hd1080p30, hd1080p25, hd720p60, 4k30, 4k60, sd_pal, sd_ntsc).
+            Overrides width/height/fps if set.
+        width: Video width in pixels.
+        height: Video height in pixels.
+        fps_num: FPS numerator.
+        fps_den: FPS denominator.
+        progressive: Whether video is progressive.
+        dar_num: Display aspect ratio numerator.
+        dar_den: Display aspect ratio denominator.
+    """
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        current_profile = proj.get("profile", {})
+
+        if profile:
+            if profile not in proj_mod.PROFILES:
+                return _err(f"Unknown profile: {profile}")
+            new_profile = proj_mod.PROFILES[profile]
+        else:
+            new_profile = {
+                "name": "custom",
+                "width": width or current_profile.get("width", 1920),
+                "height": height or current_profile.get("height", 1080),
+                "fps_num": fps_num or current_profile.get("fps_num", 30),
+                "fps_den": fps_den or current_profile.get("fps_den", 1),
+                "progressive": progressive if progressive is not None else current_profile.get("progressive", True),
+                "dar_num": dar_num or current_profile.get("dar_num", 16),
+                "dar_den": dar_den or current_profile.get("dar_den", 9),
+            }
+
+        _session.snapshot("Set project profile")
+        proj["profile"] = new_profile
+        _save()
+        return _ok(new_profile)
+    except (ValueError, RuntimeError) as e:
+        return _err(str(e))
 
 
 # ── Project Bin (Assets) ─────────────────────────────────────────
@@ -863,6 +1014,769 @@ def session_history() -> dict[str, Any]:
     if not _session.has_project():
         return _err("No project loaded.")
     return _ok(_session.list_history())
+
+
+@server.tool()
+def project_get_render_profiles() -> dict[str, Any]:
+    """Alias for project_list_profiles - get available render presets."""
+    return _ok(export_mod.list_render_presets())
+
+
+# ── Clip Properties (timeline) ───────────────────────────────────
+
+def _get_timeline_clip(project: dict[str, Any], track_id: int, clip_index: int) -> dict[str, Any]:
+    for t in project.get("tracks", []):
+        if t["id"] == track_id:
+            clips = t.get("clips", [])
+            if 0 <= clip_index < len(clips):
+                return clips[clip_index]
+            raise IndexError(f"Clip index {clip_index} out of range (0-{len(clips)-1})")
+    raise ValueError(f"Track not found: {track_id}")
+
+
+@server.tool()
+def clip_get_properties(track_id: int, clip_index: int) -> dict[str, Any]:
+    """Get timeline clip properties: in/out, duration, speed, opacity, reverse."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        clip = _get_timeline_clip(proj, track_id, clip_index)
+        in_p = clip.get("in", 0.0)
+        out_p = clip.get("out", 0.0)
+        duration = out_p - in_p
+        # speed from filters
+        speed = 1.0
+        opacity = 1.0
+        reverse = False
+        for f in clip.get("filters", []):
+            if f.get("name") == "speed":
+                speed = f.get("params", {}).get("speed", 1.0)
+                if speed < 0:
+                    reverse = True
+            if f.get("name") in ("opacity", "frei0r.opacity"):
+                opacity = f.get("params", {}).get("opacity", 1.0)
+        # also bin clip duration
+        bin_clip = None
+        for c in proj.get("bin", []):
+            if c["id"] == clip.get("clip_id"):
+                bin_clip = c
+                break
+        return _ok({
+            "track_id": track_id,
+            "clip_index": clip_index,
+            "clip_id": clip.get("clip_id"),
+            "position": clip.get("position", 0.0),
+            "in": in_p,
+            "out": out_p,
+            "duration": duration,
+            "speed": speed,
+            "opacity": opacity,
+            "reverse": reverse,
+            "filters": clip.get("filters", []),
+            "bin_clip": bin_clip,
+        })
+    except (ValueError, IndexError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def clip_set_speed(track_id: int, clip_index: int, speed: float) -> dict[str, Any]:
+    """Set playback speed of a timeline clip (1.0=normal, 2.0=2x, 0.5=half, negative=reverse)."""
+    err = _require_project()
+    if err:
+        return err
+    if speed == 0:
+        return _err("Speed cannot be 0")
+    try:
+        proj = _session.get_project()
+        clip = _get_timeline_clip(proj, track_id, clip_index)
+        _session.snapshot(f"Set clip speed to {speed}")
+        # find existing speed filter
+        for f in clip.get("filters", []):
+            if f.get("name") == "speed":
+                f["params"]["speed"] = speed
+                _save()
+                return _ok(f)
+        # add new
+        spec = filt_mod.FILTER_REGISTRY.get("speed", {"mlt_service": "timewarp"})
+        new_f = {"name": "speed", "mlt_service": spec["mlt_service"], "params": {"speed": speed}, "enabled": True}
+        clip.setdefault("filters", []).append(new_f)
+        _save()
+        return _ok(new_f)
+    except (ValueError, IndexError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def clip_reverse(track_id: int, clip_index: int) -> dict[str, Any]:
+    """Reverse playback direction of a timeline clip (toggles)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        clip = _get_timeline_clip(proj, track_id, clip_index)
+        _session.snapshot("Reverse clip")
+        # find speed filter
+        for f in clip.get("filters", []):
+            if f.get("name") == "speed":
+                cur = f.get("params", {}).get("speed", 1.0)
+                f["params"]["speed"] = -cur
+                _save()
+                return _ok(f)
+        # no speed filter -> add reverse speed -1
+        spec = filt_mod.FILTER_REGISTRY.get("speed", {"mlt_service": "timewarp"})
+        new_f = {"name": "speed", "mlt_service": spec["mlt_service"], "params": {"speed": -1.0}, "enabled": True}
+        clip.setdefault("filters", []).append(new_f)
+        _save()
+        return _ok(new_f)
+    except (ValueError, IndexError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def clip_set_opacity(track_id: int, clip_index: int, opacity: float) -> dict[str, Any]:
+    """Set opacity of a timeline clip (0.0 transparent .. 1.0 opaque)."""
+    err = _require_project()
+    if err:
+        return err
+    if not 0.0 <= opacity <= 1.0:
+        return _err("Opacity must be between 0.0 and 1.0")
+    try:
+        proj = _session.get_project()
+        clip = _get_timeline_clip(proj, track_id, clip_index)
+        _session.snapshot(f"Set opacity to {opacity}")
+        for f in clip.get("filters", []):
+            if f.get("name") in ("opacity", "frei0r.opacity"):
+                f["params"]["opacity"] = opacity
+                _save()
+                return _ok(f)
+        spec = filt_mod.FILTER_REGISTRY.get("opacity", {"mlt_service": "frei0r.opacity"})
+        new_f = {"name": "opacity", "mlt_service": spec["mlt_service"], "params": {"opacity": opacity}, "enabled": True}
+        clip.setdefault("filters", []).append(new_f)
+        _save()
+        return _ok(new_f)
+    except (ValueError, IndexError, RuntimeError) as e:
+        return _err(str(e))
+
+
+# ── Track Management ─────────────────────────────────────────────
+
+@server.tool()
+def track_get_info(track_id: int) -> dict[str, Any]:
+    """Get detailed info for a single track (including clips)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for t in proj.get("tracks", []):
+            if t["id"] == track_id:
+                return _ok(t)
+        return _err(f"Track not found: {track_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def track_set_name(track_id: int, name: str) -> dict[str, Any]:
+    """Rename a track."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for t in proj.get("tracks", []):
+            if t["id"] == track_id:
+                _session.snapshot(f"Rename track {track_id}")
+                t["name"] = name
+                _save()
+                return _ok(t)
+        return _err(f"Track not found: {track_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def track_set_locked(track_id: int, locked: bool) -> dict[str, Any]:
+    """Lock/unlock a track."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for t in proj.get("tracks", []):
+            if t["id"] == track_id:
+                _session.snapshot(f"Set locked={locked} for track {track_id}")
+                t["locked"] = locked
+                _save()
+                return _ok(t)
+        return _err(f"Track not found: {track_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def track_set_hidden(track_id: int, hidden: bool) -> dict[str, Any]:
+    """Hide/show a track (video visibility)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for t in proj.get("tracks", []):
+            if t["id"] == track_id:
+                _session.snapshot(f"Set hidden={hidden} for track {track_id}")
+                t["hide"] = hidden
+                _save()
+                return _ok(t)
+        return _err(f"Track not found: {track_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def track_set_muted(track_id: int, muted: bool) -> dict[str, Any]:
+    """Mute/unmute a track (audio)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for t in proj.get("tracks", []):
+            if t["id"] == track_id:
+                _session.snapshot(f"Set muted={muted} for track {track_id}")
+                t["mute"] = muted
+                _save()
+                return _ok(t)
+        return _err(f"Track not found: {track_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def track_move_up(track_id: int) -> dict[str, Any]:
+    """Move track up one position (swap with previous)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        tracks = proj.get("tracks", [])
+        idx = next((i for i, t in enumerate(tracks) if t["id"] == track_id), None)
+        if idx is None:
+            return _err(f"Track not found: {track_id}")
+        if idx == 0:
+            return _err("Track already at top")
+        _session.snapshot(f"Move track {track_id} up")
+        tracks[idx], tracks[idx - 1] = tracks[idx - 1], tracks[idx]
+        _save()
+        return _ok({"moved": track_id, "new_index": idx - 1})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def track_move_down(track_id: int) -> dict[str, Any]:
+    """Move track down one position (swap with next)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        tracks = proj.get("tracks", [])
+        idx = next((i for i, t in enumerate(tracks) if t["id"] == track_id), None)
+        if idx is None:
+            return _err(f"Track not found: {track_id}")
+        if idx == len(tracks) - 1:
+            return _err("Track already at bottom")
+        _session.snapshot(f"Move track {track_id} down")
+        tracks[idx], tracks[idx + 1] = tracks[idx + 1], tracks[idx]
+        _save()
+        return _ok({"moved": track_id, "new_index": idx + 1})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+# ── Timeline Navigation ──────────────────────────────────────────
+
+@server.tool()
+def timeline_get_duration() -> dict[str, Any]:
+    """Get total timeline duration in seconds (max end time)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        max_end = 0.0
+        for t in proj.get("tracks", []):
+            for c in t.get("clips", []):
+                end = c.get("position", 0.0) + (c.get("out", 0.0) - c.get("in", 0.0))
+                # adjust for speed filter
+                speed = 1.0
+                for f in c.get("filters", []):
+                    if f.get("name") == "speed":
+                        speed = abs(f.get("params", {}).get("speed", 1.0))
+                if speed != 0:
+                    end = c.get("position", 0.0) + (c.get("out", 0.0) - c.get("in", 0.0)) / speed
+                if end > max_end:
+                    max_end = end
+        return _ok({"duration": max_end})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def timeline_get_position() -> dict[str, Any]:
+    """Get current playhead position."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        pos = proj.get("timeline_state", {}).get("position", 0.0)
+        return _ok({"position": pos})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def timeline_seek(position: float) -> dict[str, Any]:
+    """Seek playhead to position (seconds)."""
+    err = _require_project()
+    if err:
+        return err
+    if position < 0:
+        return _err("Position must be >= 0")
+    try:
+        proj = _session.get_project()
+        if "timeline_state" not in proj:
+            proj["timeline_state"] = {}
+        proj["timeline_state"]["position"] = position
+        _save()
+        return _ok({"position": position})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def timeline_get_zoom() -> dict[str, Any]:
+    """Get timeline zoom level."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        zoom = proj.get("timeline_state", {}).get("zoom", 1.0)
+        return _ok({"zoom": zoom})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def timeline_set_zoom(zoom: float) -> dict[str, Any]:
+    """Set timeline zoom level (0.1 .. 10.0)."""
+    err = _require_project()
+    if err:
+        return err
+    if not 0.1 <= zoom <= 10.0:
+        return _err("Zoom must be between 0.1 and 10.0")
+    try:
+        proj = _session.get_project()
+        if "timeline_state" not in proj:
+            proj["timeline_state"] = {}
+        _session.snapshot(f"Set zoom to {zoom}")
+        proj["timeline_state"]["zoom"] = zoom
+        _save()
+        return _ok({"zoom": zoom})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+# ── Guides / Markers extended ────────────────────────────────────
+
+@server.tool()
+def guide_get(guide_id: int) -> dict[str, Any]:
+    """Get single guide by ID."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for g in proj.get("guides", []):
+            if g["id"] == guide_id:
+                return _ok(g)
+        return _err(f"Guide not found: {guide_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def guide_update(
+    guide_id: int,
+    position: float | None = None,
+    label: str | None = None,
+    guide_type: str | None = None,
+    comment: str | None = None,
+) -> dict[str, Any]:
+    """Update guide properties."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        for g in proj.get("guides", []):
+            if g["id"] == guide_id:
+                _session.snapshot(f"Update guide {guide_id}")
+                if position is not None:
+                    if position < 0:
+                        return _err("Position must be >=0")
+                    g["position"] = position
+                if label is not None:
+                    g["label"] = label
+                if guide_type is not None:
+                    if guide_type not in guide_mod.GUIDE_TYPES:
+                        return _err(f"Invalid guide type: {guide_type}")
+                    g["type"] = guide_type
+                if comment is not None:
+                    g["comment"] = comment
+                # re-sort
+                proj["guides"].sort(key=lambda x: x["position"])
+                _save()
+                return _ok(g)
+        return _err(f"Guide not found: {guide_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def marker_add(position: float, label: str = "", comment: str = "", marker_type: str = "default", track_id: int | None = None, clip_index: int | None = None) -> dict[str, Any]:
+    """Add timeline or clip marker (markers separate from guides)."""
+    err = _require_project()
+    if err:
+        return err
+    if position < 0:
+        return _err("Position must be >=0")
+    try:
+        proj = _session.get_project()
+        _session.snapshot("Add marker")
+        if "markers" not in proj:
+            proj["markers"] = []
+        # next id
+        next_id = max([m["id"] for m in proj["markers"]], default=0) + 1
+        marker = {
+            "id": next_id,
+            "position": position,
+            "label": label,
+            "comment": comment,
+            "type": marker_type,
+            "track_id": track_id,
+            "clip_index": clip_index,
+        }
+        proj["markers"].append(marker)
+        proj["markers"].sort(key=lambda x: x["position"])
+        _save()
+        return _ok(marker)
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def marker_list() -> dict[str, Any]:
+    """List all markers."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        return _ok(proj.get("markers", []))
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def marker_remove(marker_id: int) -> dict[str, Any]:
+    """Remove marker by ID."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        markers = proj.get("markers", [])
+        for i, m in enumerate(markers):
+            if m["id"] == marker_id:
+                _session.snapshot(f"Remove marker {marker_id}")
+                removed = markers.pop(i)
+                _save()
+                return _ok(removed)
+        return _err(f"Marker not found: {marker_id}")
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+# ── Render Queue ─────────────────────────────────────────────────
+
+@server.tool()
+def render_queue_add(output_path: str, preset: str | None = None, in_point: float | None = None, out_point: float | None = None) -> dict[str, Any]:
+    """Add job to render queue."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        job_id = len(_render_queue) + 1
+        job = {
+            "id": job_id,
+            "output_path": os.path.abspath(output_path),
+            "preset": preset,
+            "in_point": in_point,
+            "out_point": out_point,
+            "status": "queued",
+            "created": __import__("datetime").datetime.now().isoformat(),
+        }
+        _render_queue.append(job)
+        _render_status["total"] = len(_render_queue)
+        return _ok(job)
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def render_queue_list() -> dict[str, Any]:
+    """List render queue jobs."""
+    err = _require_project()
+    if err:
+        return err
+    return _ok(_render_queue)
+
+
+@server.tool()
+def render_queue_status() -> dict[str, Any]:
+    """Get render queue status."""
+    err = _require_project()
+    if err:
+        return err
+    return _ok({**_render_status, "queue_length": len(_render_queue), "jobs": _render_queue})
+
+
+@server.tool()
+def render_queue_start() -> dict[str, Any]:
+    """Start processing render queue (renders sequentially via melt)."""
+    err = _require_project()
+    if err:
+        return err
+    if _render_status.get("running"):
+        return _err("Render queue already running")
+    if not _render_queue:
+        return _err("Render queue empty")
+    try:
+        import subprocess
+        _render_status["running"] = True
+        _render_status["completed"] = 0
+        results = []
+        for job in _render_queue:
+            if job["status"] == "completed":
+                continue
+            job["status"] = "rendering"
+            _render_status["current"] = job["id"]
+            try:
+                xml = export_mod.generate_kdenlive_xml(_session.get_project())
+                melt_cmd = ["melt", "-"]
+                consumer = f"avformat:{job['output_path']}"
+                if job.get("preset"):
+                    melt_cmd += ["-consumer", consumer, f"preset={job['preset']}"]
+                else:
+                    melt_cmd += ["-consumer", consumer]
+                result = subprocess.run(melt_cmd, input=xml, capture_output=True, text=True, timeout=300)
+                if result.returncode == 0:
+                    job["status"] = "completed"
+                    _render_status["completed"] += 1
+                    results.append({"id": job["id"], "status": "completed"})
+                else:
+                    job["status"] = "failed"
+                    job["error"] = result.stderr.strip()[:500]
+                    results.append({"id": job["id"], "status": "failed", "error": job["error"]})
+            except FileNotFoundError:
+                job["status"] = "failed"
+                job["error"] = "melt binary not found"
+                results.append({"id": job["id"], "status": "failed"})
+                break
+            except subprocess.TimeoutExpired:
+                job["status"] = "failed"
+                job["error"] = "render timeout"
+                results.append({"id": job["id"], "status": "failed"})
+        _render_status["running"] = False
+        _render_status["current"] = None
+        return _ok({"results": results, "status": _render_status})
+    except RuntimeError as e:
+        _render_status["running"] = False
+        return _err(str(e))
+
+
+@server.tool()
+def render_queue_stop() -> dict[str, Any]:
+    """Stop render queue (marks running as stopped)."""
+    err = _require_project()
+    if err:
+        return err
+    if not _render_status.get("running"):
+        return _err("Render queue not running")
+    _render_status["running"] = False
+    _render_status["current"] = None
+    return _ok({"stopped": True})
+
+
+# ── Undo/Redo Granular ───────────────────────────────────────────
+
+@server.tool()
+def session_undo_step(steps: int = 1) -> dict[str, Any]:
+    """Undo N steps (granular)."""
+    if not _session.has_project():
+        return _err("No project loaded.")
+    if steps < 1:
+        return _err("Steps must be >=1")
+    try:
+        undone = []
+        for _ in range(steps):
+            try:
+                desc = _session.undo()
+                undone.append(desc)
+            except RuntimeError as e:
+                if not undone:
+                    return _err(str(e))
+                break
+        _save()
+        return _ok({"undone": undone, "steps": len(undone)})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def session_redo_step(steps: int = 1) -> dict[str, Any]:
+    """Redo N steps (granular)."""
+    if not _session.has_project():
+        return _err("No project loaded.")
+    if steps < 1:
+        return _err("Steps must be >=1")
+    try:
+        redone = []
+        for _ in range(steps):
+            try:
+                desc = _session.redo()
+                redone.append(desc)
+            except RuntimeError as e:
+                if not redone:
+                    return _err(str(e))
+                break
+        _save()
+        return _ok({"redone": redone, "steps": len(redone)})
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+# ── Bin / Clip Organization ──────────────────────────────────────
+
+@server.tool()
+def bin_create_folder(name: str, parent: str | None = None) -> dict[str, Any]:
+    """Create folder in project bin."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        if "bin_folders" not in proj:
+            proj["bin_folders"] = []
+        if any(f["name"] == name and f.get("parent") == parent for f in proj["bin_folders"]):
+            return _err(f"Folder already exists: {name}")
+        _session.snapshot(f"Create folder {name}")
+        folder = {"name": name, "parent": parent, "created": __import__("datetime").datetime.now().isoformat()}
+        proj["bin_folders"].append(folder)
+        _save()
+        return _ok(folder)
+    except RuntimeError as e:
+        return _err(str(e))
+
+
+@server.tool()
+def bin_move_clip(clip_id: str, folder: str | None = None) -> dict[str, Any]:
+    """Move clip to folder (or root if folder None)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        # find actual bin entry (get_clip returns copy)
+        target = next((c for c in proj.get("bin", []) if c["id"] == clip_id), None)
+        if target is None:
+            return _err(f"Clip not found: {clip_id}")
+        if folder is not None:
+            folders = proj.get("bin_folders", [])
+            if not any(f["name"] == folder for f in folders):
+                return _err(f"Folder not found: {folder}")
+        _session.snapshot(f"Move clip {clip_id} to {folder}")
+        target["folder"] = folder
+        _save()
+        return _ok(dict(target))
+    except (ValueError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def bin_rename(clip_id: str, new_name: str) -> dict[str, Any]:
+    """Rename bin clip."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        target = next((c for c in proj.get("bin", []) if c["id"] == clip_id), None)
+        if target is None:
+            return _err(f"Clip not found: {clip_id}")
+        _session.snapshot(f"Rename clip {clip_id}")
+        target["name"] = new_name
+        _save()
+        return _ok(dict(target))
+    except (ValueError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def clip_set_color(clip_id: str, color: str) -> dict[str, Any]:
+    """Set color label for bin clip (hex or named)."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        target = next((c for c in proj.get("bin", []) if c["id"] == clip_id), None)
+        if target is None:
+            return _err(f"Clip not found: {clip_id}")
+        _session.snapshot(f"Set color for {clip_id}")
+        target["color"] = color
+        _save()
+        return _ok(dict(target))
+    except (ValueError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def clip_add_note(clip_id: str, note: str) -> dict[str, Any]:
+    """Add / update note for bin clip."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        target = next((c for c in proj.get("bin", []) if c["id"] == clip_id), None)
+        if target is None:
+            return _err(f"Clip not found: {clip_id}")
+        _session.snapshot(f"Add note to {clip_id}")
+        target["note"] = note
+        _save()
+        return _ok(dict(target))
+    except (ValueError, RuntimeError) as e:
+        return _err(str(e))
 
 
 # ── Entry Point ──────────────────────────────────────────────────
