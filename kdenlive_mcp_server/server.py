@@ -7,6 +7,7 @@ so that the in-memory session persists across tool calls.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -139,6 +140,27 @@ def _probe_duration(media_path: str) -> float | None:
     except (FileNotFoundError, ValueError, subprocess.TimeoutExpired, OSError):
         pass
     return None
+
+
+def _normalize_mlt_producers(xml: str) -> str:
+    """Fix MLT producer settings so real-world media actually decodes.
+
+    The kdenlive-cli library emits ``avformat-novalidate`` producers with
+    hardcoded ``video_index=0``/``audio_index=1``. On many real files
+    (e.g. phone MP4s with yuvj420p / jpeg-range, or audio-as-stream-0
+    layouts) ``avformat-novalidate`` silently outputs a blank/white frame
+    and the forced indexes point video at the wrong stream. Using the
+    validated ``avformat`` producer and letting it auto-select streams
+    (as ``melt file.mp4`` does by default) decodes correctly.
+
+    This only rewrites producer properties; it does not change clips,
+    tracks, filters, or transitions.
+    """
+    xml = xml.replace("avformat-novalidate", "avformat")
+    xml = re.sub(r'<property name="video_index">[^<]*</property>\s*', "", xml)
+    xml = re.sub(r'<property name="audio_index">[^<]*</property>\s*', "", xml)
+    return xml
+
 
 
 def _require_project() -> dict[str, Any] | None:
@@ -985,7 +1007,7 @@ def export_xml(output_path: str | None = None) -> dict[str, Any]:
     if err:
         return err
     try:
-        xml = export_mod.generate_kdenlive_xml(_session.get_project())
+        xml = _normalize_mlt_producers(export_mod.generate_kdenlive_xml(_session.get_project()))
         if output_path:
             resolved = _resolve_path(output_path)
             # ensure parent dir exists
@@ -1027,7 +1049,7 @@ def export_render(
         import subprocess
         import tempfile
 
-        xml = export_mod.generate_kdenlive_xml(_session.get_project())
+        xml = _normalize_mlt_producers(export_mod.generate_kdenlive_xml(_session.get_project()))
         if not xml.strip():
             return _err("No XML content generated from project")
 
@@ -1721,7 +1743,7 @@ def render_queue_start() -> dict[str, Any]:
             job["status"] = "rendering"
             _render_status["current"] = job["id"]
             try:
-                xml = export_mod.generate_kdenlive_xml(_session.get_project())
+                xml = _normalize_mlt_producers(export_mod.generate_kdenlive_xml(_session.get_project()))
                 if not xml.strip():
                     job["status"] = "failed"
                     job["error"] = "empty XML"
