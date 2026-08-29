@@ -120,6 +120,11 @@ def _err(msg: str) -> dict[str, Any]:
     return {"success": False, "error": msg}
 
 
+def _resolve_path(p: str) -> str:
+    """Expand ~ and env vars, then abspath. Handles ~/ correctly."""
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
+
+
 def _require_project() -> dict[str, Any] | None:
     if not _session.has_project():
         return _err("No project open. Call project_new or project_open first.")
@@ -166,9 +171,17 @@ def project_new(
             width=width, height=height,
             fps_num=fps_num, fps_den=fps_den,
         )
-        _session.set_project(proj, os.path.abspath(output_path))
+        resolved = _resolve_path(output_path)
+        # if output_path is a directory, append default filename
+        if os.path.isdir(resolved) or output_path.endswith(("/", os.sep)):
+            resolved = os.path.join(resolved, f"{name}.kdenlive-cli.json")
+        _session.set_project(proj, resolved)
         _session.save_session()
         info = proj_mod.get_project_info(proj)
+        status = _session.status()
+        info["saved_path"] = status["project_path"]
+        info["saved"] = os.path.exists(status["project_path"]) if status["project_path"] else False
+        info["modified"] = status["modified"]
         return _ok(info)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
         return _err(str(e))
@@ -181,7 +194,7 @@ def project_open(project_path: str) -> dict[str, Any]:
     Args:
         project_path: Path to an existing project file.
     """
-    resolved = os.path.abspath(project_path)
+    resolved = _resolve_path(project_path)
     if not os.path.exists(resolved):
         return _err(f"Project file not found: {resolved}")
     try:
@@ -204,9 +217,13 @@ def project_save(output_path: str | None = None) -> dict[str, Any]:
     if err:
         return err
     try:
-        saved = _session.save_session(
-            os.path.abspath(output_path) if output_path else None
-        )
+        resolved = _resolve_path(output_path) if output_path else None
+        if resolved and (os.path.isdir(resolved) or output_path.endswith(("/", os.sep))):
+            # directory given -> save inside with current name
+            proj = _session.get_project()
+            name = proj.get("name", "untitled")
+            resolved = os.path.join(resolved, f"{name}.kdenlive-cli.json")
+        saved = _session.save_session(resolved)
         return _ok({"saved": saved})
     except (ValueError, RuntimeError) as e:
         return _err(str(e))
@@ -219,7 +236,13 @@ def project_get_info() -> dict[str, Any]:
     if err:
         return err
     try:
-        return _ok(proj_mod.get_project_info(_session.get_project()))
+        info = proj_mod.get_project_info(_session.get_project())
+        status = _session.status()
+        info["saved_path"] = status.get("project_path")
+        info["saved_exists"] = os.path.exists(status["project_path"]) if status.get("project_path") else False
+        info["modified"] = status.get("modified")
+        info["has_project"] = status.get("has_project")
+        return _ok(info)
     except RuntimeError as e:
         return _err(str(e))
 
@@ -321,9 +344,9 @@ def bin_import_clip(
     if err:
         return err
 
-    resolved = os.path.abspath(clip_path)
+    resolved = _resolve_path(clip_path)
     if not os.path.exists(resolved):
-        return _err(f"Media file not found: {clip_path}")
+        return _err(f"Media file not found: {clip_path} (resolved: {resolved})")
 
     try:
         _session.snapshot("Import clip")
@@ -915,9 +938,14 @@ def export_xml(output_path: str | None = None) -> dict[str, Any]:
     try:
         xml = export_mod.generate_kdenlive_xml(_session.get_project())
         if output_path:
-            with open(output_path, "w") as f:
+            resolved = _resolve_path(output_path)
+            # ensure parent dir exists
+            parent = os.path.dirname(resolved)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(resolved, "w") as f:
                 f.write(xml)
-            return _ok({"path": output_path, "size": len(xml), "xml": xml})
+            return _ok({"path": resolved, "size": len(xml), "xml": xml})
         return _ok({"xml": xml})
     except (ValueError, RuntimeError, OSError) as e:
         return _err(str(e))
@@ -959,7 +987,12 @@ def export_render(
             tf.write(xml)
             xml_path = tf.name
         try:
-            consumer = f"avformat:{os.path.abspath(output_path)}"
+            resolved_out = _resolve_path(output_path)
+            # ensure parent dir exists for output
+            parent = os.path.dirname(resolved_out)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            consumer = f"avformat:{resolved_out}"
             melt_cmd = ["melt", xml_path]
             # add consumer via args
             if preset:
@@ -974,12 +1007,12 @@ def export_render(
             )
             # melt often prints QThreadStorage warning but exit 0; treat warnings as non-fatal
             # only fail if no output file created
-            if result.returncode != 0 and not os.path.exists(os.path.abspath(output_path)):
+            if result.returncode != 0 and not os.path.exists(resolved_out):
                 return _err(result.stderr.strip()[-1200:] or f"melt exit code {result.returncode}")
-            if not os.path.exists(os.path.abspath(output_path)):
+            if not os.path.exists(resolved_out):
                 return _err(result.stderr.strip()[-1200:] or "melt did not create output")
 
-            return _ok({"output": output_path, "info": result.stdout[:500], "stderr": result.stderr[:500]})
+            return _ok({"output": resolved_out, "info": result.stdout[:500], "stderr": result.stderr[:500]})
         finally:
             try:
                 os.unlink(xml_path)
@@ -1578,10 +1611,11 @@ def render_queue_add(output_path: str, preset: str | None = None, in_point: floa
     if err:
         return err
     try:
+        resolved_out = _resolve_path(output_path)
         job_id = len(_render_queue) + 1
         job = {
             "id": job_id,
-            "output_path": os.path.abspath(output_path),
+            "output_path": resolved_out,
             "preset": preset,
             "in_point": in_point,
             "out_point": out_point,
