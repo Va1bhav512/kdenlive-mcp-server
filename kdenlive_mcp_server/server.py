@@ -1048,6 +1048,9 @@ def export_render(
                 melt_cmd += ["-consumer", consumer, f"preset={preset}"]
             else:
                 melt_cmd += ["-consumer", consumer]
+            # real_time=-1 avoids melt hanging (and producing blank/white output)
+            # on certain files/clocks where the realtime consumer stalls.
+            melt_cmd += ["real_time=-1"]
 
             env = os.environ.copy()
             env.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -1085,7 +1088,7 @@ def session_undo() -> dict[str, Any]:
         desc = _session.undo()
         _save()
         return _ok({"undone": desc})
-    except RuntimeError as e:
+    except Exception as e:
         return _err(str(e))
 
 
@@ -1098,7 +1101,7 @@ def session_redo() -> dict[str, Any]:
         desc = _session.redo()
         _save()
         return _ok({"redone": desc})
-    except RuntimeError as e:
+    except Exception as e:
         return _err(str(e))
 
 
@@ -1732,6 +1735,7 @@ def render_queue_start() -> dict[str, Any]:
                     melt_cmd = ["melt", xml_path, "-consumer", consumer]
                     if job.get("preset"):
                         melt_cmd += [f"preset={job['preset']}"]
+                    melt_cmd += ["real_time=-1"]
                     env = os.environ.copy()
                     env.setdefault("QT_QPA_PLATFORM", "offscreen")
                     result = subprocess.run(melt_cmd, capture_output=True, text=True, timeout=300, env=env)
@@ -1805,13 +1809,13 @@ def session_undo_step(steps: int = 1) -> dict[str, Any]:
             try:
                 desc = _session.undo()
                 undone.append(desc)
-            except RuntimeError as e:
+            except Exception as e:
                 if not undone:
                     return _err(str(e))
                 break
         _save()
         return _ok({"undone": undone, "steps": len(undone)})
-    except RuntimeError as e:
+    except Exception as e:
         return _err(str(e))
 
 
@@ -1828,13 +1832,13 @@ def session_redo_step(steps: int = 1) -> dict[str, Any]:
             try:
                 desc = _session.redo()
                 redone.append(desc)
-            except RuntimeError as e:
+            except Exception as e:
                 if not redone:
                     return _err(str(e))
                 break
         _save()
         return _ok({"redone": redone, "steps": len(redone)})
-    except RuntimeError as e:
+    except Exception as e:
         return _err(str(e))
 
 
