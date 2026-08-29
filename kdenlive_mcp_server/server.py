@@ -948,25 +948,43 @@ def export_render(
         return err
     try:
         import subprocess
+        import tempfile
 
         xml = export_mod.generate_kdenlive_xml(_session.get_project())
         if not xml.strip():
             return _err("No XML content generated from project")
 
-        melt_cmd = ["melt", "-"]
-        consumer = f"avformat:{os.path.abspath(output_path)}"
-        if preset:
-            melt_cmd += ["-consumer", consumer, f"preset={preset}"]
-        else:
-            melt_cmd += ["-consumer", consumer]
+        # Write XML to temp file - more reliable than stdin pipe headless
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".mlt", delete=False) as tf:
+            tf.write(xml)
+            xml_path = tf.name
+        try:
+            consumer = f"avformat:{os.path.abspath(output_path)}"
+            melt_cmd = ["melt", xml_path]
+            # add consumer via args
+            if preset:
+                melt_cmd += ["-consumer", consumer, f"preset={preset}"]
+            else:
+                melt_cmd += ["-consumer", consumer]
 
-        result = subprocess.run(
-            melt_cmd, input=xml, capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            return _err(result.stderr.strip() or f"melt exit code {result.returncode}")
+            env = os.environ.copy()
+            env.setdefault("QT_QPA_PLATFORM", "offscreen")
+            result = subprocess.run(
+                melt_cmd, capture_output=True, text=True, timeout=300, env=env,
+            )
+            # melt often prints QThreadStorage warning but exit 0; treat warnings as non-fatal
+            # only fail if no output file created
+            if result.returncode != 0 and not os.path.exists(os.path.abspath(output_path)):
+                return _err(result.stderr.strip()[-1200:] or f"melt exit code {result.returncode}")
+            if not os.path.exists(os.path.abspath(output_path)):
+                return _err(result.stderr.strip()[-1200:] or "melt did not create output")
 
-        return _ok({"output": output_path, "info": result.stdout[:500]})
+            return _ok({"output": output_path, "info": result.stdout[:500], "stderr": result.stderr[:500]})
+        finally:
+            try:
+                os.unlink(xml_path)
+            except OSError:
+                pass
     except FileNotFoundError:
         return _err("melt binary not found. Install: apt install melt")
     except OSError as e:
@@ -1395,6 +1413,41 @@ def timeline_set_zoom(zoom: float) -> dict[str, Any]:
         return _err(str(e))
 
 
+@server.tool()
+def timeline_get_info() -> dict[str, Any]:
+    """Get comprehensive timeline info: tracks+clips, duration, position, zoom, guides, markers, profile."""
+    err = _require_project()
+    if err:
+        return err
+    try:
+        proj = _session.get_project()
+        # duration
+        max_end = 0.0
+        for t in proj.get("tracks", []):
+            for c in t.get("clips", []):
+                speed = 1.0
+                for f in c.get("filters", []):
+                    if f.get("name") == "speed":
+                        speed = abs(f.get("params", {}).get("speed", 1.0))
+                end = c.get("position", 0.0) + (c.get("out", 0.0) - c.get("in", 0.0)) / max(speed, 0.01)
+                if end > max_end:
+                    max_end = end
+        state = proj.get("timeline_state", {})
+        return _ok({
+            "tracks": proj.get("tracks", []),
+            "track_summaries": tl_mod.list_tracks(proj),
+            "duration": max_end,
+            "position": state.get("position", 0.0),
+            "zoom": state.get("zoom", 1.0),
+            "guides": proj.get("guides", []),
+            "markers": proj.get("markers", []),
+            "profile": proj.get("profile", {}),
+            "clip_count": sum(len(t.get("clips", [])) for t in proj.get("tracks", [])),
+        })
+    except RuntimeError as e:
+        return _err(str(e))
+
+
 # ── Guides / Markers extended ────────────────────────────────────
 
 @server.tool()
@@ -1572,6 +1625,7 @@ def render_queue_start() -> dict[str, Any]:
         return _err("Render queue empty")
     try:
         import subprocess
+        import tempfile
         _render_status["running"] = True
         _render_status["completed"] = 0
         results = []
@@ -1582,21 +1636,47 @@ def render_queue_start() -> dict[str, Any]:
             _render_status["current"] = job["id"]
             try:
                 xml = export_mod.generate_kdenlive_xml(_session.get_project())
-                melt_cmd = ["melt", "-"]
-                consumer = f"avformat:{job['output_path']}"
-                if job.get("preset"):
-                    melt_cmd += ["-consumer", consumer, f"preset={job['preset']}"]
-                else:
-                    melt_cmd += ["-consumer", consumer]
-                result = subprocess.run(melt_cmd, input=xml, capture_output=True, text=True, timeout=300)
-                if result.returncode == 0:
-                    job["status"] = "completed"
-                    _render_status["completed"] += 1
-                    results.append({"id": job["id"], "status": "completed"})
-                else:
+                if not xml.strip():
                     job["status"] = "failed"
-                    job["error"] = result.stderr.strip()[:500]
+                    job["error"] = "empty XML"
                     results.append({"id": job["id"], "status": "failed", "error": job["error"]})
+                    continue
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".mlt", delete=False) as tf:
+                    tf.write(xml)
+                    xml_path = tf.name
+                try:
+                    consumer = f"avformat:{job['output_path']}"
+                    melt_cmd = ["melt", xml_path, "-consumer", consumer]
+                    if job.get("preset"):
+                        melt_cmd += [f"preset={job['preset']}"]
+                    env = os.environ.copy()
+                    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+                    result = subprocess.run(melt_cmd, capture_output=True, text=True, timeout=300, env=env)
+                    # treat QThreadStorage warning as non-fatal if file exists
+                    out_exists = os.path.exists(job["output_path"]) and os.path.getsize(job["output_path"]) > 0
+                    if result.returncode == 0 or out_exists:
+                        # also check if file created despite non-zero due to Qt warning
+                        if out_exists:
+                            job["status"] = "completed"
+                            _render_status["completed"] += 1
+                            results.append({"id": job["id"], "status": "completed"})
+                        elif result.returncode == 0:
+                            job["status"] = "completed"
+                            _render_status["completed"] += 1
+                            results.append({"id": job["id"], "status": "completed"})
+                        else:
+                            job["status"] = "failed"
+                            job["error"] = result.stderr.strip()[-500:] or f"exit {result.returncode}"
+                            results.append({"id": job["id"], "status": "failed", "error": job["error"]})
+                    else:
+                        job["status"] = "failed"
+                        job["error"] = result.stderr.strip()[-500:] or f"melt exit code {result.returncode}"
+                        results.append({"id": job["id"], "status": "failed", "error": job["error"]})
+                finally:
+                    try:
+                        os.unlink(xml_path)
+                    except OSError:
+                        pass
             except FileNotFoundError:
                 job["status"] = "failed"
                 job["error"] = "melt binary not found"
