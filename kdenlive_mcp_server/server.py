@@ -35,10 +35,10 @@ _render_status: dict[str, Any] = {"running": False, "current": None, "completed"
 # Extend filter registry with additional frei0r/effect filters
 _EXTRA_FILTERS: dict[str, dict[str, Any]] = {
     "affine": {"mlt_service": "affine", "category": "transform", "params": {"x": {"type": "float", "default": 0}, "y": {"type": "float", "default": 0}, "scale_x": {"type": "float", "default": 1}, "scale_y": {"type": "float", "default": 1}, "angle": {"type": "float", "default": 0}}},
-    "luma_key": {"mlt_service": "luminance", "category": "keying", "params": {"threshold": {"type": "float", "default": 0.5}, "slope": {"type": "float", "default": 0.1}}},
+    "luma_key": {"mlt_service": "lumakey", "category": "keying", "params": {"threshold": {"type": "float", "default": 0.5}, "slope": {"type": "float", "default": 0.1}}},
     "opacity": {"mlt_service": "frei0r.opacity", "category": "effect", "params": {"opacity": {"type": "float", "default": 1.0}}},
     "frei0r.opacity": {"mlt_service": "frei0r.opacity", "category": "effect", "params": {"opacity": {"type": "float", "default": 1.0}}},
-    "frei0r.blur": {"mlt_service": "frei0r.blur", "category": "effect", "params": {"radius": {"type": "float", "default": 5.0}}},
+    "frei0r.blur": {"mlt_service": "frei0r.IIRblur", "category": "effect", "params": {"radius": {"type": "float", "default": 5.0}}},
     "frei0r.sharpness": {"mlt_service": "frei0r.sharpness", "category": "effect", "params": {"amount": {"type": "float", "default": 0.5}}},
     "frei0r.contrast": {"mlt_service": "frei0r.contrast0r", "category": "color", "params": {"contrast": {"type": "float", "default": 1.0}}},
     "frei0r.brightness": {"mlt_service": "frei0r.brightness", "category": "color", "params": {"brightness": {"type": "float", "default": 0.0}}},

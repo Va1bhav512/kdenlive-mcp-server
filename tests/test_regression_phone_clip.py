@@ -68,10 +68,10 @@ def test_luma_key_maps_to_luminance():
         timeline_add_clip("clip0", 0, 0)
         assert filter_add(0, 0, "luma_key", ["threshold=0.5"])["success"]
         fl = filter_list(0, 0)["data"]
-        # filter stored as luma_key but mlt_service is luminance
-        assert any(f.get("mlt_service") == "luminance" for f in (fl if isinstance(fl, list) else fl.get("filters", [])))
+        # filter stored as luma_key but mlt_service is lumakey
+        assert any(f.get("mlt_service") == "lumakey" for f in (fl if isinstance(fl, list) else fl.get("filters", [])))
         xml = export_xml()["data"]["xml"]
-        assert "luminance" in xml
+        assert "lumakey" in xml
         assert "avformat-novalidate" not in xml  # normalized to avformat
 
 
@@ -90,9 +90,9 @@ def test_phone_clip_not_white():
         assert filter_add(0, 0, "luma_key", ["threshold=0.5"])["success"]
         xml = export_xml()["data"]["xml"]
         # all three must appear as mlt_service
-        assert "frei0r.blur" in xml
+        assert "frei0r.IIRblur" in xml
         assert "affine" in xml
-        assert "luminance" in xml
+        assert "lumakey" in xml
         out = os.path.join(td, "out.mp4")
         res = export_render(out)
         assert res["success"], res
