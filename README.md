@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.va1bhav512/kdenlive-mcp-server -->
+
 # Kdenlive MCP Server
 
 A Model Context Protocol (MCP) server wrapping `cli-anything-kdenlive` for LLM-driven video editing workflows via Kdenlive.

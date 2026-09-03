@@ -1,0 +1,23 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.va1bhav512/kdenlive-mcp-server",
+  "title": "Kdenlive MCP Server",
+  "description": "MCP server for Kdenlive video editing via cli-anything-kdenlive - 36 tools for project, bin, timeline, filters, transitions, guides, export and rendering via melt/MLT XML",
+  "repository": {
+    "url": "https://github.com/Va1bhav512/kdenlive-mcp-server",
+    "source": "github"
+  },
+  "version": "0.1.2",
+  "websiteUrl": "https://github.com/Va1bhav512/kdenlive-mcp-server",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "kdenlive-mcp-server",
+      "version": "0.1.2",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
