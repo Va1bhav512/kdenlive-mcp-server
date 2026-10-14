@@ -1,4 +1,4 @@
-<!-- mcp-name: io.github.va1bhav512/kdenlive-mcp-server -->
+<!-- mcp-name: io.github.Va1bhav512/kdenlive-mcp-server -->
 
 # Kdenlive MCP Server
 
@@ -6,7 +6,7 @@ A Model Context Protocol (MCP) server wrapping `cli-anything-kdenlive` for LLM-d
 
 ## Overview
 
-This FastMCP server enables AI models to perform complex video editing tasks on Kdenlive projects through a unified set of 36 tools organized into 8 functional categories. The server uses the Python API of `cli-anything-kdenlive` directly (not subprocess) to maintain a persistent session state, ensuring modifications are immediately available to subsequent tool calls.
+This FastMCP server enables AI models to perform complex video editing tasks on Kdenlive projects through a set of 75 tools. The server uses the Python API of `cli-anything-kdenlive` directly (not subprocess) to maintain a persistent session state, ensuring modifications are immediately available to subsequent tool calls.
 
 ### Key Features
 
@@ -14,7 +14,7 @@ This FastMCP server enables AI models to perform complex video editing tasks on 
 - **Gen 5 XML Export**: Kdenlive-compatible XML output with proper bin references and version metadata
 - **Robust Error Handling**: All exceptions caught and returned as structured JSON payloads
 - **Auto-Project Tracking**: Globally tracks project path; all tools automatically target the active project
-- **36 MCP Tools**: Comprehensive coverage of Kdenlive operations
+- **75 MCP Tools**: Comprehensive coverage of Kdenlive operations
 
 ## Installation
 
@@ -75,7 +75,7 @@ result = export_xml(output_path="output.kdenlive")
 kdenlive-mcp-server/
 ├── kdenlive_mcp_server/
 │   ├── __init__.py           # Empty package init
-│   └── server.py             # FastMCP server with 36 tools (876 lines)
+│   └── server.py             # FastMCP server with 75 tools
 ├── main.py                   # Entry point delegating to server module
 ├── pyproject.toml            # Project configuration and dependencies
 ├── uv.lock                   # Dependency lock file
@@ -159,6 +159,56 @@ kdenlive-mcp-server/
 | `session_redo()` | Redo the last undone operation |
 | `session_status()` | Inspect session state (project loaded, modified flag, history depth) |
 | `session_history()` | List all undo/redo history entries |
+
+### Batch Editing & Vertical Video (new in 0.2.0)
+
+| Tool | Description |
+|------|-------------|
+| `timeline_build_from_segments()` | Place many keep-segments of one bin clip back to back in a single, single-undo call |
+| `clip_reframe_vertical()` | Center-crop a 16:9 clip to fill a 9:16 frame, with a horizontal pan |
+
+#### `timeline_build_from_segments(clip_id, segments, track=0, start=0.0, gap=0.0, include_audio=True, audio_track=None)`
+
+Cutting a long take with `timeline_split_clip` / `timeline_remove_clip` is fragile because
+every removal shifts the `clip_index` of the clips after it. Instead, compute the ranges you
+want to keep and place them all at once:
+
+```python
+timeline_add_track()  # video track 0
+timeline_build_from_segments(
+    clip_id="clip0",
+    segments=[{"start": 0.5, "end": 1.5}, {"start": 3.0, "end": 4.5}, {"start": 6.0, "end": 8.0}],
+)
+# -> {"placed": 3, "timeline_duration": 4.5, "kept_seconds": 4.5, "track": 0, "audio_track": 1, ...}
+```
+
+- `segments` is a list of `{start, end}` in source seconds, or a path to a JSON file
+  containing `{"segments": [...]}`.
+- Segments are sorted, clamped to the clip's duration, merged where they overlap or touch,
+  and dropped if shorter than 0.05 s. An empty result is an error.
+- Segments are laid out from `start`, separated by `gap` seconds.
+- Clips on a video track render without sound, so when the source has an audio stream the
+  same segments are mirrored onto an audio track (the first existing one, or a new `A1`).
+  Pass `include_audio=False` to skip this, or `audio_track=<id>` to choose the track.
+- The whole build, including any auto-created audio track, is one undo step:
+  a single `session_undo()` reverts it.
+
+#### `clip_reframe_vertical(track_id, clip_index, x_offset=0.0)`
+
+For Shorts/Reels/TikTok, start the project with a vertical profile (`vertical1080p30` or
+`vertical1080p60`, both 1080x1920), then reframe each landscape clip:
+
+```python
+project_new("short.kdenlive-cli.json", profile="vertical1080p30")
+# ... import + timeline_build_from_segments ...
+clip_reframe_vertical(track_id=0, clip_index=0)                 # center
+clip_reframe_vertical(track_id=0, clip_index=1, x_offset=-0.5)  # pan left
+```
+
+The source is scaled so its height fills the frame, then shifted horizontally:
+`x_offset` -1 shows the left edge, 0 the center, 1 the right edge. It adds an `affine`
+filter (Kdenlive's Transform effect) with a `transition.rect`; calling it again on the same
+clip updates that filter instead of stacking another. Center crop only, no face tracking.
 
 ## Example Workflows
 

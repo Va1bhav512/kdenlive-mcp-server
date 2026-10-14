@@ -141,7 +141,7 @@ fade_in_audio, fade_out_audio, volume, crop, rotate, speed, chroma_key
 ## Video Profiles
 
 hd1080p30, hd1080p25, hd1080p24, hd1080p60, hd720p30, hd720p25,
-hd720p60, 4k30, 4k60, sd_ntsc, sd_pal
+hd720p60, 4k30, 4k60, vertical1080p30, vertical1080p60, sd_ntsc, sd_pal
 
 ## Running Tests
 

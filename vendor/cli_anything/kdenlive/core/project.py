@@ -55,6 +55,16 @@ PROFILES = {
         "fps_num": 60, "fps_den": 1, "progressive": True,
         "dar_num": 16, "dar_den": 9,
     },
+    "vertical1080p30": {
+        "name": "vertical1080p30", "width": 1080, "height": 1920,
+        "fps_num": 30, "fps_den": 1, "progressive": True,
+        "dar_num": 9, "dar_den": 16,
+    },
+    "vertical1080p60": {
+        "name": "vertical1080p60", "width": 1080, "height": 1920,
+        "fps_num": 60, "fps_den": 1, "progressive": True,
+        "dar_num": 9, "dar_den": 16,
+    },
     "sd_ntsc": {
         "name": "sd_ntsc", "width": 720, "height": 480,
         "fps_num": 30000, "fps_den": 1001, "progressive": False,

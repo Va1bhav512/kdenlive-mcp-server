@@ -142,6 +142,89 @@ def _probe_duration(media_path: str) -> float | None:
     return None
 
 
+def _probe_streams(media_path: str) -> dict[str, Any] | None:
+    """ffprobe the first video stream's size and whether any audio stream exists.
+
+    Returns {"width", "height", "has_audio"} (width/height None for audio-only),
+    or None if ffprobe is unavailable or fails.
+    """
+    try:
+        import json
+        import subprocess
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,width,height",
+             "-of", "json", media_path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+    except (FileNotFoundError, ValueError, subprocess.TimeoutExpired, OSError):
+        return None
+    video = next((s for s in streams if s.get("codec_type") == "video"), {})
+    return {
+        "width": video.get("width"),
+        "height": video.get("height"),
+        "has_audio": any(s.get("codec_type") == "audio" for s in streams),
+    }
+
+
+_MIN_SEGMENT = 0.05
+
+
+def _normalize_segments(raw: list[Any], duration: float) -> list[tuple[float, float]]:
+    """Sort, clamp to [0, duration], merge overlaps, drop segments < 0.05 s.
+
+    ``raw`` items are {"start", "end"} dicts (or [start, end] pairs).
+    ``duration`` <= 0 means unknown, so only the lower bound is clamped.
+    """
+    parsed: list[tuple[float, float]] = []
+    for i, seg in enumerate(raw):
+        try:
+            if isinstance(seg, dict):
+                start, end = float(seg["start"]), float(seg["end"])
+            else:
+                start, end = float(seg[0]), float(seg[1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise ValueError(f"Segment {i} is not {{start, end}}: {seg!r}")
+        start = max(start, 0.0)
+        if duration > 0:
+            end = min(end, duration)
+        if end > start:
+            parsed.append((start, end))
+    parsed.sort()
+
+    merged: list[list[float]] = []
+    for start, end in parsed:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged if e - s >= _MIN_SEGMENT - 1e-9]
+
+
+def _load_segments(segments: list[Any] | str) -> list[Any]:
+    """Accept a list of segments, a JSON string, or a path to a JSON file
+    holding either a list or {"segments": [...]}."""
+    import json
+    data: Any = segments
+    if isinstance(segments, str):
+        text = segments.strip()
+        if text.startswith(("[", "{")):
+            data = json.loads(text)
+        else:
+            resolved = _resolve_path(text)
+            if not os.path.exists(resolved):
+                raise ValueError(f"Segments file not found: {resolved}")
+            with open(resolved) as f:
+                data = json.load(f)
+    if isinstance(data, dict):
+        data = data.get("segments")
+    if not isinstance(data, list):
+        raise ValueError('segments must be a list of {start, end} or {"segments": [...]}')
+    return data
+
+
 def _normalize_mlt_producers(xml: str) -> str:
     """Fix MLT producer settings so real-world media actually decodes.
 
@@ -195,7 +278,7 @@ def project_new(
 
     Args:
         output_path: Path where the project JSON will be saved (.kdenlive-cli.json).
-        profile: Preset profile (hd1080p30, hd1080p25, hd720p60, 4k30, 4k60, sd_pal, sd_ntsc).
+        profile: Preset profile (hd1080p30, hd1080p25, hd720p60, 4k30, 4k60, vertical1080p30, vertical1080p60, sd_pal, sd_ntsc).
             Overrides width/height/fps if set.
         name: Human-readable project name.
         width: Video width in pixels (ignored when profile is set).
@@ -287,7 +370,7 @@ def project_get_info() -> dict[str, Any]:
 
 @server.tool()
 def project_list_profiles() -> dict[str, Any]:
-    """Enumerate all available video output profiles (hd1080p30, 4k60, sd_pal, etc.)."""
+    """Enumerate all available video output profiles (hd1080p30, 4k60, vertical1080p30, sd_pal, etc.)."""
     return _ok(proj_mod.list_profiles())
 
 
@@ -319,7 +402,7 @@ def project_set_profile(
     """Set or update the project's video profile.
 
     Args:
-        profile: Preset profile name (hd1080p30, hd1080p25, hd720p60, 4k30, 4k60, sd_pal, sd_ntsc).
+        profile: Preset profile name (hd1080p30, hd1080p25, hd720p60, 4k30, 4k60, vertical1080p30, vertical1080p60, sd_pal, sd_ntsc).
             Overrides width/height/fps if set.
         width: Video width in pixels.
         height: Video height in pixels.
@@ -678,6 +761,115 @@ def timeline_list() -> dict[str, Any]:
     if err:
         return err
     return _ok(tl_mod.list_tracks(_session.get_project()))
+
+
+@server.tool()
+def timeline_build_from_segments(
+    clip_id: str,
+    segments: list[dict[str, float]] | str,
+    track: int = 0,
+    start: float = 0.0,
+    gap: float = 0.0,
+    include_audio: bool = True,
+    audio_track: int | None = None,
+) -> dict[str, Any]:
+    """Place many keep-segments of one bin clip back to back in a single call.
+
+    Segments are sorted, clamped to the clip's duration, merged where they
+    overlap, and dropped if shorter than 0.05 s. The whole build is one undo
+    step: a single session_undo reverts it.
+
+    Clips on a video track render without sound, so when the source has audio
+    the same segments are mirrored onto an audio track (the first existing one,
+    or a new "A1" if the project has none).
+
+    Args:
+        clip_id: Bin clip identifier (from bin_list_clips).
+        segments: Source time ranges to keep, as [{"start": s, "end": e}, ...] in
+            seconds, or a path to a JSON file containing {"segments": [...]}.
+        track: Target track for the segments.
+        start: Timeline position of the first segment in seconds.
+        gap: Seconds of empty timeline between consecutive segments.
+        include_audio: Mirror segments onto an audio track when the source has audio.
+        audio_track: Audio track to mirror onto. Defaults to the first audio track,
+            creating one if none exists.
+    """
+    err = _require_project()
+    if err:
+        return err
+    if start < 0 or gap < 0:
+        return _err("start and gap must be >= 0")
+    try:
+        proj = _session.get_project()
+        bin_clip = next((c for c in proj.get("bin", []) if c["id"] == clip_id), None)
+        if bin_clip is None:
+            return _err(f"Clip not found in bin: {clip_id}")
+        duration = bin_clip.get("duration", 0.0)
+        if duration == 0.0:
+            probed = _probe_duration(bin_clip.get("source", ""))
+            if probed and probed > 0:
+                bin_clip["duration"] = duration = probed
+
+        normalized = _normalize_segments(_load_segments(segments), duration)
+        if not normalized:
+            return _err(
+                f"No segments left after validation (clip duration {duration}s, "
+                f"minimum segment {_MIN_SEGMENT}s)"
+            )
+
+        tracks = proj.get("tracks", [])
+        target = next((t for t in tracks if t["id"] == track), None)
+        if target is None:
+            return _err(f"Track not found: {track}. Create one with timeline_add_track.")
+        if target.get("locked"):
+            return _err(f"Track {track} is locked.")
+
+        mirror = None
+        create_audio_track = False
+        if include_audio and target.get("type") != "audio" and bin_clip.get("type") == "video":
+            info = _probe_streams(bin_clip.get("source", ""))
+            # probe unavailable: assume the video has sound (a silent mirror is harmless)
+            if info is None or info["has_audio"]:
+                if audio_track is not None:
+                    mirror = next((t for t in tracks if t["id"] == audio_track), None)
+                    if mirror is None or mirror.get("type") != "audio":
+                        return _err(f"Audio track not found: {audio_track}")
+                else:
+                    mirror = next((t for t in tracks if t.get("type") == "audio"), None)
+                    create_audio_track = mirror is None
+                if mirror is not None and mirror.get("locked"):
+                    return _err(f"Track {mirror['id']} is locked.")
+
+        _session.snapshot("Build from segments")
+        try:
+            if create_audio_track:
+                mirror = tl_mod.add_track(proj, track_type="audio")
+            position = start
+            for seg_start, seg_end in normalized:
+                tl_mod.add_clip_to_track(
+                    proj, track, clip_id,
+                    position=position, in_point=seg_start, out_point=seg_end,
+                )
+                if mirror is not None:
+                    tl_mod.add_clip_to_track(
+                        proj, mirror["id"], clip_id,
+                        position=position, in_point=seg_start, out_point=seg_end,
+                    )
+                position = round(position + (seg_end - seg_start) + gap, 6)
+        except Exception:
+            _session.undo()
+            raise
+        _save()
+        return _ok({
+            "placed": len(normalized),
+            "timeline_duration": timeline_get_duration()["data"]["duration"],
+            "kept_seconds": round(sum(e - s for s, e in normalized), 6),
+            "track": track,
+            "audio_track": mirror["id"] if mirror is not None else None,
+            "segments": [{"start": s, "end": e} for s, e in normalized],
+        })
+    except (ValueError, RuntimeError, IndexError, OSError) as e:
+        return _err(str(e))
 
 
 # ── Effects / Filters ────────────────────────────────────────────
@@ -1280,6 +1472,66 @@ def clip_set_opacity(track_id: int, clip_index: int, opacity: float) -> dict[str
                 return _ok(f)
         spec = filt_mod.FILTER_REGISTRY.get("opacity", {"mlt_service": "frei0r.opacity"})
         new_f = {"name": "opacity", "mlt_service": spec["mlt_service"], "params": {"opacity": opacity}, "enabled": True}
+        clip.setdefault("filters", []).append(new_f)
+        _save()
+        return _ok(new_f)
+    except (ValueError, IndexError, RuntimeError) as e:
+        return _err(str(e))
+
+
+@server.tool()
+def clip_reframe_vertical(track_id: int, clip_index: int, x_offset: float = 0.0) -> dict[str, Any]:
+    """Center-crop a landscape (16:9) clip to fill a vertical (9:16) frame.
+
+    Scales the source so its height fills the project frame, then pans
+    horizontally. Uses MLT's affine filter (Kdenlive "Transform" effect).
+    Calling it again on the same clip updates the existing reframe.
+    Set a vertical profile first (project_set_profile("vertical1080p30")).
+
+    Args:
+        track_id: Track containing the clip.
+        clip_index: 0-based clip index.
+        x_offset: Horizontal pan from -1 (show left edge) to 1 (show right edge); 0 = center.
+    """
+    err = _require_project()
+    if err:
+        return err
+    if not -1.0 <= x_offset <= 1.0:
+        return _err("x_offset must be between -1.0 and 1.0")
+    try:
+        proj = _session.get_project()
+        clip = _get_timeline_clip(proj, track_id, clip_index)
+        profile = proj.get("profile", {})
+        frame_w = profile.get("width", 1080)
+        frame_h = profile.get("height", 1920)
+
+        src_aspect = 16 / 9
+        bin_clip = next((c for c in proj.get("bin", []) if c["id"] == clip.get("clip_id")), None)
+        info = _probe_streams(bin_clip.get("source", "")) if bin_clip else None
+        if info and info["width"] and info["height"]:
+            src_aspect = info["width"] / info["height"]
+        if src_aspect <= frame_w / frame_h:
+            return _err(
+                f"Source aspect {src_aspect:.3f} is not wider than the "
+                f"{frame_w}x{frame_h} frame; nothing to reframe. Set a vertical profile first."
+            )
+
+        # fill height; the overflow (scaled_w - frame_w) is what x_offset pans across
+        scaled_w = frame_h * src_aspect
+        x = -(scaled_w - frame_w) / 2 * (1 + x_offset)
+        params = {
+            "transition.rect": f"{round(x)} 0 {round(scaled_w)} {frame_h} 1",
+            "transition.fill": 1,
+            "transition.distort": 0,
+        }
+
+        _session.snapshot(f"Reframe vertical (x_offset={x_offset})")
+        for f in clip.get("filters", []):
+            if f.get("name") == "affine" and "transition.rect" in f.get("params", {}):
+                f["params"] = params
+                _save()
+                return _ok(f)
+        new_f = {"name": "affine", "mlt_service": "affine", "params": params, "enabled": True}
         clip.setdefault("filters", []).append(new_f)
         _save()
         return _ok(new_f)

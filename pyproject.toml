@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kdenlive-mcp-server"
-version = "0.1.2"
+version = "0.2.0"
 description = "MCP server for Kdenlive video editing via cli-anything-kdenlive"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,3 +28,8 @@ packages = ["kdenlive_mcp_server"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "vendor/cli_anything" = "cli_anything"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
